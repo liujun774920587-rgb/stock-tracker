@@ -1,137 +1,58 @@
 """
 utils/database.py
-Manages all SQLite storage: watchlist, daily prices, alerts, settings.
-Uses context managers so connections are always closed cleanly.
+使用 Supabase 云端数据库存储所有股票数据。
+数据永久保存，手机电脑都能访问。
 """
 
-import sqlite3
-import os
 import logging
 from datetime import datetime, timedelta
-from contextlib import contextmanager
+import streamlit as st
+from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
-# Database stored in the data/ folder next to this package
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "stocks.db")
+# 从 Streamlit secrets 读取配置
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 
 
 class StockDatabase:
-    """
-    All database operations for the stock tracker.
-    Tables:
-        watchlist       — tickers the user wants to track
-        daily_prices    — one row per (ticker, date)
-        alerts          — user-defined price/volume alerts
-        settings        — key-value app settings
-    """
-
     def __init__(self):
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-        self._init_tables()
-
-    @contextmanager
-    def _conn(self):
-        """Yield a connection and always close it when done."""
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row  # rows behave like dicts
-        try:
-            yield conn
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            logger.error(f"Database error: {e}")
-            raise
-        finally:
-            conn.close()
-
-    def _init_tables(self):
-        """Create tables if they don't exist yet."""
-        with self._conn() as conn:
-            conn.executescript("""
-                CREATE TABLE IF NOT EXISTS watchlist (
-                    ticker       TEXT PRIMARY KEY,
-                    company_name TEXT,
-                    sector       TEXT DEFAULT 'Unknown',
-                    added_date   TEXT DEFAULT CURRENT_DATE
-                );
-
-                CREATE TABLE IF NOT EXISTS daily_prices (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticker           TEXT NOT NULL,
-                    date             TEXT NOT NULL,
-                    company_name     TEXT,
-                    current_price    REAL,
-                    open_price       REAL,
-                    day_high         REAL,
-                    day_low          REAL,
-                    prev_close       REAL,
-                    volume           INTEGER,
-                    market_cap       REAL,
-                    pe_ratio         REAL,
-                    week52_high      REAL,
-                    week52_low       REAL,
-                    daily_change     REAL,
-                    daily_change_pct REAL,
-                    sector           TEXT,
-                    timestamp        TEXT,
-                    UNIQUE(ticker, date)
-                );
-
-                CREATE TABLE IF NOT EXISTS alerts (
-                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticker       TEXT NOT NULL,
-                    alert_type   TEXT NOT NULL,
-                    threshold    REAL NOT NULL,
-                    active       INTEGER DEFAULT 1,
-                    created_date TEXT DEFAULT CURRENT_DATE,
-                    last_triggered TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS settings (
-                    key   TEXT PRIMARY KEY,
-                    value TEXT
-                );
-            """)
+        self.client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
     # ── Watchlist ─────────────────────────────────────────────────────────────
 
     def add_to_watchlist(self, ticker: str, company_name: str = "", sector: str = "Unknown"):
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO watchlist (ticker, company_name, sector) VALUES (?, ?, ?)",
-                (ticker.upper(), company_name, sector)
-            )
+        try:
+            self.client.table("watchlist").upsert({
+                "ticker": ticker.upper(),
+                "company_name": company_name,
+                "sector": sector
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error adding to watchlist: {e}")
 
     def remove_from_watchlist(self, ticker: str):
-        with self._conn() as conn:
-            conn.execute("DELETE FROM watchlist WHERE ticker = ?", (ticker.upper(),))
+        try:
+            self.client.table("watchlist").delete().eq("ticker", ticker.upper()).execute()
+        except Exception as e:
+            logger.error(f"Error removing from watchlist: {e}")
 
     def get_watchlist(self) -> list[str]:
-        with self._conn() as conn:
-            rows = conn.execute("SELECT ticker FROM watchlist ORDER BY ticker").fetchall()
-        return [r["ticker"] for r in rows]
+        try:
+            res = self.client.table("watchlist").select("ticker").order("ticker").execute()
+            return [r["ticker"] for r in res.data]
+        except Exception as e:
+            logger.error(f"Error getting watchlist: {e}")
+            return []
 
     # ── Daily Prices ──────────────────────────────────────────────────────────
 
     def save_daily_data(self, ticker: str, data: dict):
-        """
-        Insert or replace a daily snapshot.
-        The UNIQUE(ticker, date) constraint prevents duplicates.
-        """
         if not data:
             return
-        with self._conn() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO daily_prices
-                    (ticker, date, company_name, current_price, open_price, day_high, day_low,
-                     prev_close, volume, market_cap, pe_ratio, week52_high, week52_low,
-                     daily_change, daily_change_pct, sector, timestamp)
-                VALUES
-                    (:ticker, :date, :company_name, :current_price, :open_price, :day_high, :day_low,
-                     :prev_close, :volume, :market_cap, :pe_ratio, :week52_high, :week52_low,
-                     :daily_change, :daily_change_pct, :sector, :timestamp)
-            """, {
+        try:
+            self.client.table("daily_prices").upsert({
                 "ticker": ticker.upper(),
                 "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
                 "company_name": data.get("company_name", ticker),
@@ -149,82 +70,107 @@ class StockDatabase:
                 "daily_change_pct": data.get("daily_change_pct"),
                 "sector": data.get("sector", "Unknown"),
                 "timestamp": data.get("timestamp", datetime.now().isoformat()),
-            })
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error saving daily data: {e}")
 
     def get_latest_prices(self, tickers: list[str]) -> list[dict]:
-        """Return the most recent price record for each ticker."""
         if not tickers:
             return []
         results = []
-        with self._conn() as conn:
+        try:
             for ticker in tickers:
-                row = conn.execute(
-                    "SELECT * FROM daily_prices WHERE ticker = ? ORDER BY date DESC LIMIT 1",
-                    (ticker,)
-                ).fetchone()
-                if row:
-                    results.append(dict(row))
+                res = self.client.table("daily_prices").select("*").eq(
+                    "ticker", ticker).order("date", desc=True).limit(1).execute()
+                if res.data:
+                    results.append(res.data[0])
+        except Exception as e:
+            logger.error(f"Error getting latest prices: {e}")
         return results
 
     def get_price_history(self, ticker: str, days: int = 30) -> list[dict]:
-        """Return daily price rows for a ticker over the last N days."""
         since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM daily_prices WHERE ticker = ? AND date >= ? ORDER BY date ASC",
-                (ticker.upper(), since)
-            ).fetchall()
-        return [dict(r) for r in rows]
+        try:
+            res = self.client.table("daily_prices").select("*").eq(
+                "ticker", ticker.upper()).gte("date", since).order("date").execute()
+            return res.data
+        except Exception as e:
+            logger.error(f"Error getting price history: {e}")
+            return []
 
     def get_weekly_data(self, ticker: str) -> list[dict]:
-        """Return daily records for the past 7 calendar days."""
         return self.get_price_history(ticker, 7)
 
     # ── Alerts ────────────────────────────────────────────────────────────────
 
     def add_alert(self, ticker: str, alert_type: str, threshold: float):
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO alerts (ticker, alert_type, threshold) VALUES (?, ?, ?)",
-                (ticker.upper(), alert_type, threshold)
-            )
+        try:
+            self.client.table("alerts").insert({
+                "ticker": ticker.upper(),
+                "alert_type": alert_type,
+                "threshold": threshold
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error adding alert: {e}")
 
     def get_all_alerts(self) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute("SELECT * FROM alerts ORDER BY ticker").fetchall()
-        return [dict(r) for r in rows]
+        try:
+            res = self.client.table("alerts").select("*").order("ticker").execute()
+            return res.data
+        except Exception as e:
+            logger.error(f"Error getting alerts: {e}")
+            return []
 
     def delete_alert(self, alert_id: int):
-        with self._conn() as conn:
-            conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,))
+        try:
+            self.client.table("alerts").delete().eq("id", alert_id).execute()
+        except Exception as e:
+            logger.error(f"Error deleting alert: {e}")
 
     def mark_alert_triggered(self, alert_id: int):
-        with self._conn() as conn:
-            conn.execute(
-                "UPDATE alerts SET last_triggered = ? WHERE id = ?",
-                (datetime.now().isoformat(), alert_id)
-            )
+        try:
+            self.client.table("alerts").update({
+                "last_triggered": datetime.now().isoformat()
+            }).eq("id", alert_id).execute()
+        except Exception as e:
+            logger.error(f"Error marking alert: {e}")
 
     # ── Settings ──────────────────────────────────────────────────────────────
 
     def save_setting(self, key: str, value: str):
-        with self._conn() as conn:
-            conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+        try:
+            self.client.table("settings").upsert({
+                "key": key, "value": value
+            }).execute()
+        except Exception as e:
+            logger.error(f"Error saving setting: {e}")
 
     def get_setting(self, key: str, default: str = "") -> str:
-        with self._conn() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else default
+        try:
+            res = self.client.table("settings").select("value").eq("key", key).execute()
+            return res.data[0]["value"] if res.data else default
+        except Exception as e:
+            logger.error(f"Error getting setting: {e}")
+            return default
 
     # ── Maintenance ───────────────────────────────────────────────────────────
 
     def clear_all_data(self):
-        with self._conn() as conn:
-            conn.execute("DELETE FROM daily_prices")
+        try:
+            self.client.table("daily_prices").delete().neq("id", 0).execute()
+        except Exception as e:
+            logger.error(f"Error clearing data: {e}")
 
     def get_db_stats(self) -> dict:
-        with self._conn() as conn:
-            n_prices = conn.execute("SELECT COUNT(*) as c FROM daily_prices").fetchone()["c"]
-            n_tickers = conn.execute("SELECT COUNT(DISTINCT ticker) as c FROM daily_prices").fetchone()["c"]
-            earliest = conn.execute("SELECT MIN(date) as d FROM daily_prices").fetchone()["d"]
-        return {"total_records": n_prices, "tickers": n_tickers, "earliest_date": earliest}
+        try:
+            res = self.client.table("daily_prices").select("ticker, date").execute()
+            tickers = set(r["ticker"] for r in res.data)
+            dates = [r["date"] for r in res.data]
+            return {
+                "total_records": len(res.data),
+                "tickers": len(tickers),
+                "earliest_date": min(dates) if dates else None
+            }
+        except Exception as e:
+            logger.error(f"Error getting stats: {e}")
+            return {}
