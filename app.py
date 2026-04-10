@@ -526,7 +526,7 @@ elif page == "⚙️ Settings":
             db.clear_all_data()
             st.warning("All data cleared.")
 
-、# 自动刷新
+# Auto refresh every 5 minutes
 import time
 time.sleep(300)
 st.rerun()
