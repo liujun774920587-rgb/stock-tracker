@@ -1,0 +1,26 @@
+name: Daily Stock Fetch
+
+on:
+  schedule:
+    - cron: '30 21 * * 1-5'  # 每天周一到周五 美东时间4:30PM
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas supabase
+
+      - name: Fetch stock data
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python fetch_cloud.py
