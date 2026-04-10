@@ -101,6 +101,20 @@ def init_services():
 
 db, fetcher, alerts, reporter = init_services()
 
+# 每5分钟自动刷新一次
+import time
+if "auto_refresh" not in st.session_state:
+    st.session_state.auto_refresh = True
+
+if st.session_state.auto_refresh:
+    results = fetcher.fetch_all(st.session_state.watchlist)
+    for ticker, data in results.items():
+        if data:
+            db.save_daily_data(ticker, data)
+    st.session_state.last_refresh = datetime.now()
+    time.sleep(300)  # 等待5分钟
+    st.rerun()
+
 # ─── Session State ────────────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = db.get_watchlist()
