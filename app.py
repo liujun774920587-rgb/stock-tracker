@@ -4,6 +4,9 @@ Run with: streamlit run app.py
 """
 
 import streamlit as st
+import time
+# 每5分钟自动刷新页面
+st_autorefresh = st.empty()
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -101,19 +104,6 @@ def init_services():
 
 db, fetcher, alerts, reporter = init_services()
 
-# 每5分钟自动刷新一次
-import time
-if "auto_refresh" not in st.session_state:
-    st.session_state.auto_refresh = True
-
-if st.session_state.auto_refresh:
-    results = fetcher.fetch_all(st.session_state.watchlist)
-    for ticker, data in results.items():
-        if data:
-            db.save_daily_data(ticker, data)
-    st.session_state.last_refresh = datetime.now()
-    time.sleep(300)  # 等待5分钟
-    st.rerun()
 
 # ─── Session State ────────────────────────────────────────────────────────────
 if "watchlist" not in st.session_state:
@@ -160,7 +150,6 @@ with st.sidebar:
 
 # ─── Page: Dashboard ──────────────────────────────────────────────────────────
 if page == "🏠 Dashboard":
-    st.title("📈 Market Dashboard")
 
     watchlist = st.session_state.watchlist
     if not watchlist:
@@ -536,3 +525,8 @@ elif page == "⚙️ Settings":
         if st.checkbox("I confirm I want to delete all data"):
             db.clear_all_data()
             st.warning("All data cleared.")
+
+、# 自动刷新
+import time
+time.sleep(300)
+st.rerun()
